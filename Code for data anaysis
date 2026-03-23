@@ -1,0 +1,304 @@
+# Install if needed
+ install.packages(c("MASS", "sandwich", "lmtest", "mgcv","pscl", "AER", "performance", "DHARMa"))
+
+library(MASS)        # Negative Binomial
+library(sandwich)    # Robust SE
+library(lmtest)      # coeftest
+library(mgcv)        # GAM (for FQL-style flexible variance)
+library(pscl)        # Zero-inflated models
+library(AER)         # dispersiontest
+library(performance) # model diagnostics
+library(DHARMa)      # residual diagnostics
+ 
+ 
+ data("DoctorVisits")
+attach(DoctorVisits)
+ head(DoctorVisits)
+ summary(DoctorVisits)
+ formula <- visits ~ age+gender + income +illness+reduced+health +lchronic+freepoor
+ 
+ 
+ pois_model <- glm(formula,
+                   data = DoctorVisits,
+                   family = poisson(link = "log"))
+ summary(pois_model)
+ #overdispersion
+ dispersiontest(pois_model)
+ # mannual
+ phi_hat <- sum(residuals(pois_model, type = "pearson")^2) /
+   pois_model$df.residual
+ phi_hat
+ 
+ 
+ 
+ 
+ # Residual deviance and degrees of freedom
+ deviance(pois_model)            # residual deviance
+ df.residual(pois_model)         # residual degrees of freedom
+ 
+ # Pearson chi-square
+ sum(residuals(pois_model, type = "pearson")^2)
+ 
+ # Ratio to degrees of freedom
+ pearson_chi2 <- sum(residuals(pois_model, type = "pearson")^2)
+ df <- df.residual(pois_model)
+ pearson_chi2 / df
+ 
+ library(ResourceSelection)
+ 
+ hoslem.test(DoctorVisits$visits, fitted(pois_model), g=10)   # g = number of groups
+
+ 
+
+ 
+# Hosmer and Lemeshow Test 
+ 
+ # Predicted counts
+ pred <- predict(pois_model, type = "response")
+ 
+ # Divide into 10 groups (deciles)
+ groups <- cut(pred, breaks = quantile(pred, probs = seq(0,1,0.1)), include.lowest = TRUE)
+ 
+ # Calculate observed and expected counts per group
+ obs <- tapply(DoctorVisits$visits, groups, sum)
+ exp <- tapply(pred, groups, sum)
+ 
+ # Pearson chi-square statistic
+ chisq_stat <- sum((obs - exp)^2 / exp)
+ df <- length(obs) - length(coef(pois_model))
+ p_value <- 1 - pchisq(chisq_stat, df)
+ 
+ chisq_stat; p_value
+ 
+ 
+ 
+ #4. Poisson with Robust (Sandwich) SE
+# ============================================================
+   robust_se <- sqrt(diag(vcovHC(pois_model, type = "HC0")))
+ 
+ coeftest(pois_model, vcov = vcovHC(pois_model, type = "HC0"))
+ 
+ 
+ 
+ #5. Negative Binomial (NB2)
+# ============================================================
+   nb_model <- glm.nb(formula, data = DoctorVisits)
+ 
+ summary(nb_model)
+ 
+ nb_model$theta   # Dispersion parameter
+ 
+ # HL Test For NB2
+ 
+ # Predicted mean counts
+ pred <- predict(nb_model, type = "response")
+ 
+ # Group into 10 quantile-based bins
+ groups <- cut(pred, breaks = quantile(pred, probs = seq(0,1,0.1)), include.lowest = TRUE)
+ 
+ # Observed vs expected counts per group
+ obs <- tapply(DoctorVisits$visits, groups, sum)
+ exp <- tapply(pred, groups, sum)
+ 
+ # Compute Pearson chi-square
+ chisq_stat <- sum((obs - exp)^2 / exp)
+ 
+ # Degrees of freedom: #groups - #parameters
+ df <- length(obs) - length(coef(nb_model))
+ 
+ # p-value
+ p_value <- 1 - pchisq(chisq_stat, df)
+ 
+ # Results
+ data.frame(Chi_Square = chisq_stat, DF = df, p_value = p_value)
+ 
+#$ 6. Quasi-Poisson
+ #============================================================
+   qp_model <- glm(formula,
+                   data = DoctorVisits,
+                   family = quasipoisson(link = "log"))
+ 
+ summary(qp_model)
+ 
+ summary(qp_model)$dispersion  # estimated phi
+ 
+ # HLS
+ # Load necessary package
+ library(dplyr)
+ 
+ # Predicted counts
+ pred <- predict(qp_model, type = "response")
+ 
+ # Create 10 bins (like HL)
+ groups <- cut(pred, breaks = quantile(pred, probs = seq(0,1,0.1)), include.lowest = TRUE)
+ 
+ # Observed and expected sums per group
+ obs <- tapply(DoctorVisits$visits, groups, sum)
+ exp <- tapply(pred, groups, sum)
+ 
+ # Chi-square statistic
+ chisq_stat <- sum((obs - exp)^2 / exp)
+ 
+ # Degrees of freedom: #groups - #parameters
+ df_hl <- length(obs) - length(coef(qp_model))
+ 
+ # p-value
+ p_value_hl <- 1 - pchisq(chisq_stat, df_hl)
+ 
+ data.frame(HL_ChiSq = chisq_stat, DF = df_hl, p_value = p_value_hl)
+ 
+ 
+ #7. Flexible Quasi-Likelihood (FQL Proxy via GAM)
+ #============================================================
+ 
+ fql_model <- gam(visits ~ s(age) + s(income) +
+                    lchronic + gender  +illness+reduced+health +freepoor ,
+                  data = DoctorVisits,
+                  family = poisson(link = "log"),
+                  method = "REML")
+ 
+ summary(fql_model)
+ 
+ 
+ 
+ 
+ # To allow more flexible mean-variance structure:
+   
+   fql_nb_model <- gam(visits ~  s(age) + s(income) +
+                         lchronic + gender  +illness+reduced+health +freepoor ,
+                       data = DoctorVisits,
+                       family = nb(),
+                       method = "REML")
+ 
+ summary(fql_nb_model)
+ library(mgcv)
+ 
+ # Residual plots
+ gam.check(fql_model)
+ #GOF test
+ # Deviance residuals
+ res_dev <- residuals(fql_model, type = "deviance")
+ res_pearson <- residuals(fql_model, type = "pearson")
+ 
+ # Pearson chi-square statistic
+ chi_sq <- sum(res_pearson^2)
+ df_resid <- fql_model$df.residual
+ 
+ cat("Pearson Chi-square:", chi_sq, "\n")
+ cat("Residual df:", df_resid, "\n")
+ cat("Ratio (Chi-square / df):", chi_sq / df_resid, "\n")
+ 
+ 
+ #9. Model Comparison (AIC / BIC)
+ #============================================================
+   AIC(pois_model, nb_model, fql_model, fql_nb_model)
+ 
+ BIC(pois_model, nb_model)
+ 
+ #$10. Compare Standard Errors
+# ============================================================
+   data.frame(
+     Poisson_SE = sqrt(diag(vcov(pois_model))),
+     Robust_SE  = robust_se,
+     NB_SE      = sqrt(diag(vcov(nb_model))),
+     QP_SE      = sqrt(diag(vcov(qp_model)))
+   )
+ 
+ #11. Residual Diagnostics (Very Important)
+ #============================================================
+ library(mgcViz) 
+  sim_nb <- simulateResiduals(nb_model)
+ plot(sim_nb, title = "Residual Diagnostics Plot for NB2 ")
+ 
+ sim_pois <- simulateResiduals(pois_model)
+ plot(sim_pois,title = "Residual Diagnostics Plot for Poisson ")
+ 
+ 
+ sim_pois_fql <- simulateResiduals( fql_model)
+ plot( sim_pois_fql,title= "Residual Diagnostics Plot for Poisson -fql")
+ sim_pois_nb_fql <- simulateResiduals( fql_nb_model)
+ plot(sim_pois_nb_fql, title= "Residual Diagnostics Plot for Poisson-nb -fql")
+ 
+# 12. Compare Dispersion Across Models
+ #============================================================
+   performance::check_overdispersion(pois_model)
+ performance::check_overdispersion(nb_model)
+ performance::check_overdispersion(qp_model)
+ 
+ 
+ #13. Extract Model Summary Table
+ #============================================================
+   results <- data.frame(
+     Model = c("Poisson", "NB2", "Quasi-Poisson"),
+     AIC = c(AIC(pois_model),
+             AIC(nb_model),
+             NA),
+     BIC = c(BIC(pois_model),
+             BIC(nb_model),
+             NA)
+   )
+ 
+ results
+ 
+ 
+ #14. Optional: Compare Predicted Means
+ #=====================================================
+ 
+ 
+ data.frame(
+   Model = c("Poisson", "Quasi-Poisson", "NegBin", "GAM"),
+   Deviance = c(
+     deviance(pois_model),
+     deviance(qp_model),
+     deviance(nb_model),
+     deviance(fql_model)
+   ),
+   DF = c(
+     pois_model$df.residual,
+     qp_model$df.residual,
+     nb_model$df.residual,
+     fql_model$df.residual
+   )
+ )
+
+ 
+ 
+ 
+ 
+ get_pearson <- function(model){
+   sum(residuals(model, type="pearson")^2) / model$df.residual
+ }
+ 
+ data.frame(
+   Model = c("Poisson", "Quasi-Poisson", "NegBin", "GAM"),
+   Pearson_ratio = c(
+     get_pearson(pois_model),
+     get_pearson(qp_model),
+     get_pearson(nb_model),
+     get_pearson(fql_model)
+   )
+ ) 
+ 
+ 
+ 
+ 
+ library(pscl)
+ zip_model <- zeroinfl(
+   visits ~ age + gender + income + illness + reduced + health + lchronic + freepoor
+   | age + gender + income + illness + reduced + health + lchronic + freepoor,
+   data = DoctorVisits,
+   dist = "poisson"
+ ) 
+ summary(zip_model) 
+ zinb_model <- zeroinfl(
+   visits ~ age + gender + income + illness + reduced + health + lchronic + freepoor
+   | age + gender + income + illness + reduced + health + lchronic + freepoor,
+   data = DoctorVisits,
+   dist = "negbin"
+ )
+ AIC(pois_model, nb_model, zip_model,zinb_model)
+
+ vuong(zip_model, pois_model)
+ vuong(zip_model, nb_model) 
+ vuong( zinb_model,zip_model) 
+ 
