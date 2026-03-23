@@ -1,0 +1,224 @@
+# ================================
+# Libraries
+# ================================
+library(MASS)        # for glm.nb
+library(sandwich)    # robust SE if needed
+library(lmtest)      # coeftest
+library(VGAM)        # optional, for true NB2/FQL
+
+set.seed(123)
+
+# ================================
+# Simulation Settings
+# ================================
+sample_sizes <- c(100, 200, 300, 400, 500, 1000)
+nsim <- 1000
+beta <- c(0.5, 0.3, 0.0)   # intercept, x1, x2
+alpha <- 1.5               # NB2 overdispersion parameter
+p <- length(beta)
+
+# ================================
+# Function to run simulation for one n
+# ================================
+run_simulation <- function(n) {
+  
+  # Storage
+  results <- list(
+    poisson = matrix(NA, nsim, p),
+    quasi   = matrix(NA, nsim, p),
+    fql     = matrix(NA, nsim, p),
+    nb      = matrix(NA, nsim, p)
+  )
+  
+  se_store <- results
+  pval_store <- results
+  
+  # Simulation loop
+  for (i in 1:nsim) {
+    # Generate covariates
+    x1 <- rnorm(n)
+    x2 <- rnorm(n)
+    X <- cbind(1, x1, x2)
+    
+    # Linear predictor and mean
+    eta <- X %*% beta
+    mu <- exp(eta)
+    
+    # Generate overdispersed counts (NB2)
+    y <- rnbinom(n, mu = mu, size = 1/alpha)
+    
+    # -------------------------------
+    # 1. Poisson
+    fit_pois <- glm(y ~ x1 + x2, family = poisson)
+    results$poisson[i, ] <- coef(fit_pois)
+    se_store$poisson[i, ] <- sqrt(diag(vcov(fit_pois)))
+    pval_store$poisson[i, ] <- summary(fit_pois)$coefficients[, 4]
+    
+    # -------------------------------
+    # 2. Quasi-Poisson
+    fit_quasi <- glm(y ~ x1 + x2, family = quasipoisson)
+    results$quasi[i, ] <- coef(fit_quasi)
+    se_store$quasi[i, ] <- sqrt(diag(vcov(fit_quasi)))
+    pval_store$quasi[i, ] <- summary(fit_quasi)$coefficients[, 4]
+    
+    # -------------------------------
+    # 3. Flexible Quasi-Likelihood (NB2 variance)
+    # NB2 variance: Var(Y) = mu + alpha * mu^2
+    fit_fql <- glm(y ~ x1 + x2, family = quasipoisson(link = "log"))
+    phi_hat <- summary(fit_fql)$dispersion   # estimate of overdispersion
+    results$fql[i, ] <- coef(fit_fql)
+    se_store$fql[i, ] <- sqrt(phi_hat * diag(vcov(fit_fql)))  # scale SE by phi_hat
+    pval_store$fql[i, ] <- 2 * (1 - pnorm(abs(results$fql[i, ] / se_store$fql[i, ])))
+    
+    # -------------------------------
+    # 4. Negative Binomial
+    fit_nb <- glm.nb(y ~ x1 + x2)
+    results$nb[i, ] <- coef(fit_nb)
+    se_store$nb[i, ] <- sqrt(diag(vcov(fit_nb)))
+    pval_store$nb[i, ] <- summary(fit_nb)$coefficients[, 4]
+  }
+  
+  # ================================
+  # Performance Metrics Function
+  # ================================
+  compute_metrics <- function(est, se, pval, true_beta) {
+    nsim <- nrow(est)
+    p <- ncol(est)
+    
+    bias <- colMeans(est) - true_beta
+    mse  <- colMeans((est - matrix(true_beta, nsim, p, byrow = TRUE))^2)
+    mad  <- colMeans(abs(est - matrix(true_beta, nsim, p, byrow = TRUE)))
+    
+    # 95% CI coverage
+    lower <- est - 1.96 * se
+    upper <- est + 1.96 * se
+    coverage <- colMeans((lower <= true_beta) & (upper >= true_beta))
+    
+    # Type I error (only for coefficients truly 0)
+    type1 <- rep(NA, p)
+    for (j in 1:p) if (true_beta[j] == 0) type1[j] <- mean(pval[, j] < 0.05)
+    
+    list(bias = bias, mse = mse, mad = mad, coverage = coverage, type1 = type1)
+  }
+  
+  # ================================
+  # Compute metrics for all models
+  # ================================
+  metrics <- list(
+    poisson = compute_metrics(results$poisson, se_store$poisson, pval_store$poisson, beta),
+    quasi   = compute_metrics(results$quasi,   se_store$quasi,   pval_store$quasi,   beta),
+    fql     = compute_metrics(results$fql,     se_store$fql,     pval_store$fql,     beta),
+    nb      = compute_metrics(results$nb,      se_store$nb,      pval_store$nb,      beta)
+  )
+  
+  # ================================
+  # Convert to summary table
+  # ================================
+  extract_summary <- function(metric_obj, model_name) {
+    data.frame(
+      Model = model_name,
+      Bias = mean(metric_obj$bias),
+      MSE = mean(metric_obj$mse),
+      MAD = mean(metric_obj$mad),
+      Coverage = mean(metric_obj$coverage),
+      Type_I_Error = mean(metric_obj$type1, na.rm = TRUE)
+    )
+  }
+  
+  summary_table <- rbind(
+    extract_summary(metrics$poisson, "Poisson"),
+    extract_summary(metrics$quasi, "Quasi-Poisson"),
+    extract_summary(metrics$fql, "FQL (Flexible Quasi-Likelihood)"),
+    extract_summary(metrics$nb, "Negative Binomial")
+  )
+  
+  summary_table$N <- n
+  return(summary_table)
+}
+
+# ================================
+# Run simulation for all sample sizes
+# ================================
+all_results <- do.call(rbind, lapply(sample_sizes, run_simulation))
+
+# View results
+print(all_results)
+
+
+
+
+
+# Generate covariates
+x1 <- rnorm(n)
+x2 <- rnorm(n)
+X <- cbind(1, x1, x2)
+
+# True coefficients
+beta <- c(0.5, 0.3, 0.0)
+eta <- X %*% beta
+mu <- exp(eta)
+
+# Generate overdispersed counts (NB2)
+alpha <- 1.5
+y <- rnbinom(n, mu = mu, size = 1/alpha)
+
+# ================================
+# Fit Models
+# ================================
+# 1. Poisson
+fit_pois <- glm(y ~ x1 + x2, family = poisson)
+
+# 2. Quasi-Poisson
+fit_quasi <- glm(y ~ x1 + x2, family = quasipoisson)
+phi_quasi <- summary(fit_quasi)$dispersion
+
+# 3. Robust (Flexible Quasi-Likelihood)
+fit_fql <- glm(y ~ x1 + x2, family = quasipoisson)
+phi_fql <- summary(fit_fql)$dispersion
+
+# 4. Negative Binomial
+fit_nb <- glm.nb(y ~ x1 + x2)
+theta_nb <- fit_nb$theta
+
+# ================================
+# Create mean grid for plotting
+# ================================
+mu_vals <- seq(0.1, 10, length.out = 200)
+
+plot_data <- data.frame(
+  mu = rep(mu_vals, 4),
+  variance = c(
+    mu_vals,                    # Poisson Var(Y) = mu
+    phi_quasi * mu_vals,        # Quasi-Poisson Var(Y) = phi * mu
+    phi_fql * mu_vals,          # FQL Var(Y) = phi * mu (scaled)
+    mu_vals + (mu_vals^2)/theta_nb # NB2 Var(Y) = mu + mu^2 / theta
+  ),
+  Model = factor(rep(c("Poisson",
+                       "Quasi-Poisson",
+                       "FQL (Flexible Quasi)",
+                       "Negative Binomial"),
+                     each = length(mu_vals)))
+)
+
+# ================================
+# Plot
+# ================================
+ggplot(plot_data, aes(x = mu, y = variance, color = Model, linetype = Model)) +
+  geom_line(linewidth = 1.2) +
+  labs(
+    title = "Variance Function Comparison of Count Models (n = 200)",
+    x = expression(mu),
+    y = "Variance"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "top",
+    plot.title = element_text(hjust = 0.5)
+  ) +
+  scale_color_manual(values = c(
+    "Poisson" = "#1b9e77",
+    "Quasi-Poisson" = "#d95f02",
+    "FQL (Flexible Quasi)" = "#7570b3",
+    "Negative Binomial" = "#e7298a"
+  ))
+
